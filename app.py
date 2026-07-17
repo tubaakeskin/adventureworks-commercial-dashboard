@@ -29,13 +29,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. SMART DATA LOADING WITH ENCODING FALLBACKS
+# 2. SMART DATA LOADING WITH FUZZY KEY MATCHING
 # ==============================================================================
 @st.cache_data
 def load_and_merge_data():
     """
-    Dynamically scans the data folder, handles text encoding fallbacks (latin1/utf-8),
-    and safely joins the relational tables.
+    Loads AdventureWorks CSV files and dynamically resolves column key mismatches
+    (e.g., TerritoryKey vs SalesTerritoryKey) using fuzzy string matching.
     """
     data_dir = "data" if os.path.exists("data") else "DATA"
     if not os.path.exists(data_dir):
@@ -43,17 +43,35 @@ def load_and_merge_data():
         
     all_files = os.listdir(data_dir)
     
-    # Robust CSV Reader with encoding fallback to prevent 'utf-8' decode crashes
     def read_csv_safe(file_path):
         encodings = ['utf-8', 'latin1', 'ISO-8859-1', 'cp1252']
         for enc in encodings:
             try:
                 df_temp = pd.read_csv(file_path, encoding=enc)
+                df_temp.columns = df_temp.columns.str.strip()
                 return df_temp
             except UnicodeDecodeError:
                 continue
-        # If all fail, try with errors ignored
         return pd.read_csv(file_path, encoding='utf-8', errors='ignore')
+
+    def find_best_key(df_cols, keywords):
+        """Finds the column name that contains the keywords sequentially."""
+        for col in df_cols:
+            if all(k.lower() in col.lower() for k in keywords):
+                return col
+        return None
+
+    def safe_merge(left_df, right_df, key_keywords, how='left'):
+        """Executes a left join even if column names are slightly different."""
+        left_key = find_best_key(left_df.columns, key_keywords)
+        right_key = find_best_key(right_df.columns, key_keywords)
+        
+        if left_key and right_key:
+            return pd.merge(left_df, right_df, left_on=left_key, right_on=right_key, how=how)
+        elif left_key:
+            # Fallback if right key missing, attempt using identical column names
+            return pd.merge(left_df, right_df, on=left_key, how=how)
+        return left_df
 
     # 1. Load and Union Sales Tables
     sales_files = [f for f in all_files if "Sales" in f and f.endswith(".csv")]
@@ -65,19 +83,19 @@ def load_and_merge_data():
         raise FileNotFoundError("No Sales CSV files found inside the data directory.")
         
     sales = pd.concat(sales_dfs, ignore_index=True)
-    sales.columns = sales.columns.str.strip()
-    sales['OrderDate'] = pd.to_datetime(sales['OrderDate'])
+    
+    # Resolve Date Sifgatures Safely
+    date_col = find_best_key(sales.columns, ["Date"]) or "OrderDate"
+    sales[date_col] = pd.to_datetime(sales[date_col], errors='coerce')
     
     # Helper to find and read lookup tables dynamically
     def find_and_read_lookup(keyword):
         matched = [f for f in all_files if keyword in f and f.endswith(".csv")]
         if not matched:
             raise FileNotFoundError(f"Could not find any CSV file containing '{keyword}' in '{data_dir}/'")
-        df_loaded = read_csv_safe(os.path.join(data_dir, matched[0]))
-        df_loaded.columns = df_loaded.columns.str.strip()
-        return df_loaded
+        return read_csv_safe(os.path.join(data_dir, matched[0]))
 
-    # 2. Load Lookups safely with text encoding auto-detection
+    # 2. Load Lookups
     products = find_and_read_lookup("Product Lookup")
     categories = find_and_read_lookup("Categories")
     subcategories = find_and_read_lookup("Subcategories")
@@ -86,38 +104,45 @@ def load_and_merge_data():
     returns_df = find_and_read_lookup("Returns")
     
     # 3. Create Product Model Dimension
-    prod_model = pd.merge(products, subcategories, on='ProductSubcategoryKey', how='left')
-    prod_model = pd.merge(prod_model, categories, on='ProductCategoryKey', how='left')
+    prod_model = safe_merge(products, subcategories, ["Subcategory", "Key"])
+    prod_model = safe_merge(prod_model, categories, ["Category", "Key"])
     
-    # Safe Customer Name builder
-    if 'FirstName' in customers.columns and 'LastName' in customers.columns:
-        customers['CustomerName'] = customers['FirstName'] + " " + customers['LastName']
-    elif 'CustomerName' not in customers.columns:
-        customers['CustomerName'] = "Customer " + customers['CustomerKey'].astype(str)
+    # Customer Full Name Builder
+    first_col = find_best_key(customers.columns, ["First"])
+    last_col = find_best_key(customers.columns, ["Last"])
+    if first_col and last_col:
+        customers['CustomerName'] = customers[first_col] + " " + customers[last_col]
+    else:
+        cust_id = find_best_key(customers.columns, ["Customer", "Key"]) or customers.columns[0]
+        customers['CustomerName'] = "Customer " + customers[cust_id].astype(str)
 
-    # 4. Central Fact Table Joins (SQL Star Schema mapping)
-    df = pd.merge(sales, prod_model, on='ProductKey', how='left')
-    df = pd.merge(df, territories, on='TerritoryKey', how='left')
-    df = pd.merge(df, customers, on='CustomerKey', how='left')
+    # 4. Central Fact Table Joins
+    df = safe_merge(sales, prod_model, ["Product", "Key"])
+    df = safe_merge(df, territories, ["Territory", "Key"])
+    df = safe_merge(df, customers, ["Customer", "Key"])
     
-    # Timeline Parsing
-    df['Year'] = df['OrderDate'].dt.year
-    df['Month'] = df['OrderDate'].dt.month
-    df['MonthName'] = df['OrderDate'].dt.strftime('%B')
-    df['YearMonth'] = df['OrderDate'].dt.to_period('M')
+    # Timeline Aggregation Fields
+    df['Year'] = df[date_col].dt.year
+    df['Month'] = df[date_col].dt.month
+    df['MonthName'] = df[date_col].dt.strftime('%B')
+    df['YearMonth'] = df[date_col].dt.to_period('M')
     
-    # Financial KPI Columns
-    df['Revenue'] = df['OrderQuantity'] * df['ProductPrice']
-    df['TotalCost'] = df['OrderQuantity'] * df['ProductCost']
+    # Map price and cost safely
+    qty_col = find_best_key(df.columns, ["Quantity"]) or "OrderQuantity"
+    price_col = find_best_key(df.columns, ["Price"]) or "ProductPrice"
+    cost_col = find_best_key(df.columns, ["Cost"]) or "ProductCost"
+    
+    df['Revenue'] = df[qty_col] * df[price_col]
+    df['TotalCost'] = df[qty_col] * df[cost_col]
     df['GrossProfit'] = df['Revenue'] - df['TotalCost']
     
-    return df, returns_df, prod_model, territories
+    return df, returns_df, prod_model, territories, date_col, qty_col, price_col
 
-# Execute pipeline safely
+# Execute pipeline with smart keys active
 try:
-    df, returns_df, products, territories = load_and_merge_data()
+    df, returns_df, products, territories, date_col, qty_col, price_col = load_and_merge_data()
 except Exception as e:
-    st.error(f"❌ Data pipeline execution failed. Details: {e}")
+    st.error(f"❌ Smart key mapping or table integration failed. Details: {e}")
     st.stop()
 
 # ==============================================================================
@@ -145,37 +170,49 @@ st.sidebar.subheader("🔍 Filter Options")
 years = sorted(df['Year'].dropna().unique())
 selected_year = st.sidebar.selectbox("Fiscal Year", years, index=len(years)-1)
 
-regions = ['All Regions'] + list(df['Region'].dropna().unique())
-selected_region = st.sidebar.selectbox("Region", regions)
+region_col = [c for c in df.columns if 'region' in c.lower() or 'territory' in c.lower() and 'key' not in c.lower()]
+region_col = region_col[0] if region_col else None
 
-# Filtering engine constraints
+if region_col:
+    regions = ['All Regions'] + list(df[region_col].dropna().unique())
+else:
+    regions = ['All Regions']
+selected_region = st.sidebar.selectbox("Region/Territory", regions)
+
+# Dynamic filtering
 filtered_df = df[df['Year'] == selected_year]
-if selected_region != 'All Regions':
-    filtered_df = filtered_df[filtered_df['Region'] == selected_region]
+if region_col and selected_region != 'All Regions':
+    filtered_df = filtered_df[filtered_df[region_col] == selected_region]
 
-# Calculations Matrix
+# Core Metrics
 total_revenue = filtered_df['Revenue'].sum() if not filtered_df.empty else 0
 total_profit = filtered_df['GrossProfit'].sum() if not filtered_df.empty else 0
 gross_margin = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
-num_orders = filtered_df['OrderNumber'].nunique() if not filtered_df.empty else 0
-num_customers = filtered_df['CustomerKey'].nunique() if not filtered_df.empty else 0
+
+ord_id_col = [c for c in df.columns if 'order' in c.lower() and 'number' in c.lower() or 'id' in c.lower()]
+ord_id_col = ord_id_col[0] if ord_id_col else df.columns[0]
+num_orders = filtered_df[ord_id_col].nunique() if not filtered_df.empty else 0
 avg_order_value = total_revenue / num_orders if num_orders > 0 else 0
 
+# Process Returns Matrix
 if not returns_df.empty:
-    returns_df['ReturnDate'] = pd.to_datetime(returns_df['ReturnDate'])
-    ret_detail = pd.merge(returns_df, products, on='ProductKey', how='left')
-    ret_detail = pd.merge(ret_detail, territories, on='TerritoryKey', how='left')
-    ret_detail['Year'] = ret_detail['ReturnDate'].dt.year
+    ret_date_col = [c for c in returns_df.columns if 'date' in c.lower()][0]
+    returns_df[ret_date_col] = pd.to_datetime(returns_df[ret_date_col], errors='coerce')
+    returns_df['Year'] = returns_df[ret_date_col].dt.year
+    
+    # Dynamic merge for returns audit
+    ret_prod_key = [c for c in returns_df.columns if 'product' in c.lower() and 'key' in c.lower()][0]
+    prod_key_main = [c for c in products.columns if 'product' in c.lower() and 'key' in c.lower()][0]
+    ret_detail = pd.merge(returns_df, products, left_on=ret_prod_key, right_on=prod_key_main, how='left')
     
     filtered_returns = ret_detail[ret_detail['Year'] == selected_year]
-    if selected_region != 'All Regions':
-        filtered_returns = filtered_returns[filtered_returns['Region'] == selected_region]
-    total_returns = filtered_returns['ReturnQuantity'].sum() if not filtered_returns.empty else 0
+    ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower()][0]
+    total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
 else:
     filtered_returns = pd.DataFrame()
     total_returns = 0
 
-total_sold = filtered_df['OrderQuantity'].sum() if not filtered_df.empty else 0
+total_sold = filtered_df[qty_col].sum() if not filtered_df.empty else 0
 return_rate = (total_returns / total_sold) * 100 if total_sold > 0 else 0
 
 # ==============================================================================
@@ -200,12 +237,12 @@ if page == "📊 Executive Summary":
     st.markdown("### Quick Diagnostic")
     diag_col1, diag_col2 = st.columns(2)
     with diag_col1:
-        st.info(f"💡 **Pipeline Live:** Encoding codec mismatch neutralized. Operating on live production files for FY{selected_year} within the {selected_region} division.")
+        st.info(f"💡 **Pipeline Live:** Automated key resolution active. Intelligently matching relational data mappings for FY{selected_year}.")
     with diag_col2:
         if return_rate > 3.0:
-            st.warning(f"⚠️ **Attention Required:** Return rate is high at **{return_rate:.2f}%**. Inspect quality control data via the Returns tab.")
+            st.warning(f"⚠️ **Attention Required:** Margin leakage detected. Return rate stands high at **{return_rate:.2f}%**. Inspect category breakdowns.")
         else:
-            st.success("✅ **Operations Secure:** Outbound logistics and returns are within standard margins.")
+            st.success("✅ **Operations Stable:** Outbound fulfillment vectors are performing cleanly within standard guardrails.")
 
 # ==============================================================================
 # PAGE 2: SALES PERFORMANCE
@@ -215,33 +252,39 @@ elif page == "🛍️ Sales Performance":
     st.markdown("---")
     
     col_left, col_right = st.columns(2)
+    cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower() or 'category' in c.lower() and 'key' not in c.lower()]
+    cat_name_col = cat_name_col[0] if cat_name_col else None
+    
     with col_left:
         st.subheader("Category Revenue & Profit Share")
-        if not filtered_df.empty and 'CategoryName' in filtered_df.columns:
-            cat_perf = filtered_df.groupby('CategoryName').agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
-            fig_cat = px.bar(cat_perf, x='CategoryName', y=['Revenue', 'GrossProfit'], barmode='group', color_discrete_sequence=['#003366', '#27ae60'])
+        if not filtered_df.empty and cat_name_col:
+            cat_perf = filtered_df.groupby(cat_name_col).agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
+            fig_cat = px.bar(cat_perf, x=cat_name_col, y=['Revenue', 'GrossProfit'], barmode='group', color_discrete_sequence=['#003366', '#27ae60'])
             fig_cat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_cat, use_container_width=True)
         else:
-            st.info("Category details loaded.")
+            st.info("Product category structures mapped securely.")
 
     with col_right:
         st.subheader("Regional Market Share")
-        if not filtered_df.empty:
-            reg_perf = filtered_df.groupby('Region')['Revenue'].sum().reset_index()
-            fig_reg = px.pie(reg_perf, values='Revenue', names='Region', hole=0.4, color_discrete_sequence=px.colors.sequential.YlGnBu)
+        if not filtered_df.empty and region_col:
+            reg_perf = filtered_df.groupby(region_col)['Revenue'].sum().reset_index()
+            fig_reg = px.pie(reg_perf, values='Revenue', names=region_col, hole=0.4, color_discrete_sequence=px.colors.sequential.YlGnBu)
             st.plotly_chart(fig_reg, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### 🏆 Top Performing Assets")
     tab1, tab2 = st.tabs(["Top 10 Products", "Top 10 Customers"])
+    
+    prod_name_col = [c for c in df.columns if 'product' in c.lower() and 'name' in c.lower()][0]
+    
     with tab1:
-        if not filtered_df.empty and 'ProductName' in filtered_df.columns:
-            top_products = filtered_df.groupby('ProductName').agg({'OrderQuantity': 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).sort_values(by='Revenue', ascending=False).head(10)
+        if not filtered_df.empty:
+            top_products = filtered_df.groupby(prod_name_col).agg({qty_col: 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).sort_values(by='Revenue', ascending=False).head(10)
             st.dataframe(top_products.style.format("${:,.2f}", subset=['Revenue', 'GrossProfit']), use_container_width=True)
     with tab2:
         if not filtered_df.empty:
-            top_cust = filtered_df.groupby('CustomerName').agg({'OrderNumber': 'nunique', 'Revenue': 'sum', 'GrossProfit': 'sum'}).sort_values(by='Revenue', ascending=False).head(10)
+            top_cust = filtered_df.groupby('CustomerName').agg({ord_id_col: 'nunique', 'Revenue': 'sum', 'GrossProfit': 'sum'}).sort_values(by='Revenue', ascending=False).head(10)
             st.dataframe(top_cust.style.format("${:,.2f}", subset=['Revenue', 'GrossProfit']), use_container_width=True)
 
 # ==============================================================================
@@ -251,14 +294,18 @@ elif page == "💸 Profitability & Returns":
     st.title("💸 Profitability & Returns Analysis")
     st.markdown("---")
     
+    prod_name_col = [c for c in df.columns if 'product' in c.lower() and 'name' in c.lower()][0]
+    cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower()]
+    cat_name_col = cat_name_col[0] if cat_name_col else prod_name_col
+    
     prof_col1, prof_col2 = st.columns([3, 2])
     with prof_col1:
         st.subheader("Product Profitability Quadrant")
-        if not filtered_df.empty and 'ProductName' in filtered_df.columns:
-            prod_margin = filtered_df.groupby(['ProductName', 'CategoryName' if 'CategoryName' in filtered_df.columns else 'ProductKey']).agg({'OrderQuantity': 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
+        if not filtered_df.empty:
+            prod_margin = filtered_df.groupby([prod_name_col, cat_name_col]).agg({qty_col: 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
             prod_margin['MarginPercent'] = (prod_margin['GrossProfit'] / prod_margin['Revenue']) * 100
             
-            fig_scatter = px.scatter(prod_margin, x='OrderQuantity', y='MarginPercent', size='Revenue', color='CategoryName' if 'CategoryName' in prod_margin.columns else None, hover_name='ProductName')
+            fig_scatter = px.scatter(prod_margin, x=qty_col, y='MarginPercent', size='Revenue', color=cat_name_col, hover_name=prod_name_col)
             fig_scatter.add_hline(y=prod_margin['MarginPercent'].mean(), line_dash="dash", line_color="red")
             fig_scatter.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_scatter, use_container_width=True)
@@ -266,30 +313,39 @@ elif page == "💸 Profitability & Returns":
     with prof_col2:
         st.subheader("Commercial Profitability Insights")
         if not filtered_df.empty and 'prod_margin' in locals() and not prod_margin.empty:
-            problem_products = prod_margin[prod_margin['MarginPercent'] < prod_margin['MarginPercent'].median()].sort_values(by='OrderQuantity', ascending=False)
+            problem_products = prod_margin[prod_margin['MarginPercent'] < prod_margin['MarginPercent'].median()].sort_values(by=qty_col, ascending=False)
             if not problem_products.empty:
-                st.warning(f"⚠️ **Volume/Margin Disconnect:** **{problem_products.iloc[0]['ProductName']}** indicates a heavy fulfillment footprint with tight net yields.")
+                st.warning(f"⚠️ **Volume/Margin Disconnect:** **{problem_products.iloc[0][prod_name_col]}** presents a high volume velocity paired with tight gross yields.")
             
-            reg_margin = filtered_df.groupby('Region').agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
-            reg_margin['MarginPercent'] = (reg_margin['GrossProfit'] / reg_margin['Revenue']) * 100
-            if not reg_margin.empty:
+            if region_col:
+                reg_margin = filtered_df.groupby(region_col).agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
+                reg_margin['MarginPercent'] = (reg_margin['GrossProfit'] / reg_margin['Revenue']) * 100
                 lowest_reg = reg_margin.sort_values(by='MarginPercent').iloc[0]
-                st.info(f"🌍 **Territory Review:** **{lowest_reg['Region']}** presents margin resistance sitting at **{lowest_reg['MarginPercent']:.1f}%**.")
+                st.info(f"🌍 **Territory Review:** **{lowest_reg[region_col]}** shows structural margin friction landing at **{lowest_reg['MarginPercent']:.1f}%**.")
 
     st.markdown("---")
     st.subheader("🔄 Returns Audit")
-    if filtered_returns.empty or 'ProductName' not in filtered_returns.columns:
-        st.success("🎉 **Operational Excellence:** Zero financial leakage from returns in this selection branch.")
+    if filtered_returns.empty:
+        st.success("🎉 **Operational Excellence:** Zero financial leaks from returns detected in this branch.")
     else:
         ret_col1, ret_col2 = st.columns(2)
+        ret_prod_name = [c for c in filtered_returns.columns if 'product' in c.lower() and 'name' in c.lower()][0]
+        ret_qty_col = [c for c in filtered_returns.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower()][0]
+        
         with ret_col1:
-            top_returned = filtered_returns.groupby('ProductName').agg({'ReturnQuantity': 'sum'}).sort_values(by='ReturnQuantity', ascending=False).head(5).reset_index()
-            fig_ret_bar = px.bar(top_returned, y='ProductName', x='ReturnQuantity', orientation='h', color_discrete_sequence=['#e74c3c'])
+            st.subheader("Top Returned Products")
+            top_returned = filtered_returns.groupby(ret_prod_name).agg({ret_qty_col: 'sum'}).sort_values(by=ret_qty_col, ascending=False).head(5).reset_index()
+            fig_ret_bar = px.bar(top_returned, y=ret_prod_name, x=ret_qty_col, orientation='h', color_discrete_sequence=['#e74c3c'])
             st.plotly_chart(fig_ret_bar, use_container_width=True)
         with ret_col2:
-            filtered_returns['RevenueLost'] = filtered_returns['ReturnQuantity'] * filtered_returns['ProductPrice']
-            cat_returns = filtered_returns.groupby('CategoryName' if 'CategoryName' in filtered_returns.columns else 'ProductKey').agg({'RevenueLost': 'sum'}).reset_index()
-            fig_ret_pie = px.pie(cat_returns, values='RevenueLost', names=cat_returns.columns[0], color_discrete_sequence=px.colors.sequential.Reds_r)
+            st.subheader("Financial Impact of Returns")
+            ret_price_col = [c for c in filtered_returns.columns if 'price' in c.lower() or 'amount' in c.lower()][0]
+            filtered_returns['RevenueLost'] = filtered_returns[ret_qty_col] * filtered_returns[ret_price_col]
+            ret_cat_col = [c for c in filtered_returns.columns if 'category' in c.lower() and 'name' in c.lower()]
+            ret_cat_col = ret_cat_col[0] if ret_cat_col else ret_prod_name
+            
+            cat_returns = filtered_returns.groupby(ret_cat_col).agg({'RevenueLost': 'sum'}).reset_index()
+            fig_ret_pie = px.pie(cat_returns, values='RevenueLost', names=ret_cat_col, color_discrete_sequence=px.colors.sequential.Reds_r)
             st.plotly_chart(fig_ret_pie, use_container_width=True)
 
 # ==============================================================================
@@ -326,7 +382,7 @@ elif page == "🔮 Forecasting & Strategy":
         fig_forecast = px.line(combined_forecast, x='YearMonth_Str', y='Revenue', color='Type', color_discrete_map={'Historical': '#003366', 'Forecast': '#ff7f0e'})
         st.plotly_chart(fig_forecast, use_container_width=True)
     else:
-        st.warning("Insufficient timeframe timelines to map linear regressions.")
+        st.warning("Insufficient continuous timeframe milestones to process predictive trends.")
 
 # ==============================================================================
 # PAGE 5: SCENARIO SIMULATION (WHAT-IF ANALYSIS)
@@ -370,4 +426,4 @@ elif page == "🎛️ Scenario Simulation":
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v1.8 • Encoding Safeguards Active.")
+st.caption("AdventureWorks Commercial Suite v1.9 • Key Resolution Engine Active.")

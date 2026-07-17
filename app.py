@@ -29,7 +29,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. SMART DATA LOADING WITH DATA TYPE SANITIZATION
+# 2. SMART DATA LOADING WITH FIXED RETURNS REGION MAPPING
 # ==============================================================================
 @st.cache_data
 def load_and_merge_data():
@@ -140,6 +140,19 @@ def load_and_merge_data():
     df['TotalCost'] = df[qty_col] * df[cost_col]
     df['GrossProfit'] = df['Revenue'] - df['TotalCost']
     
+    # 5. Build Robust Returns Structure Joined with Territories for safe filtering
+    if not returns_df.empty:
+        ret_date_col = [c for c in returns_df.columns if 'date' in c.lower()][0]
+        returns_df[ret_date_col] = pd.to_datetime(returns_df[ret_date_col], errors='coerce')
+        returns_df['Year'] = returns_df[ret_date_col].dt.year
+        
+        # Merge product details and territory details into returns to inherit the region columns
+        returns_df = safe_merge(returns_df, prod_model, ["Product", "Key"])
+        returns_df = safe_merge(returns_df, territories, ["Territory", "Key"])
+        
+        ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
+        returns_df[ret_qty_col] = pd.to_numeric(returns_df[ret_qty_col], errors='coerce').fillna(0)
+    
     return df, returns_df, prod_model, territories, date_col, qty_col, price_col
 
 # Execute pipeline safely
@@ -198,26 +211,14 @@ ord_id_col = ord_id_col[0] if ord_id_col else df.columns[0]
 num_orders = filtered_df[ord_id_col].nunique() if not filtered_df.empty else 0
 avg_order_value = total_revenue / num_orders if num_orders > 0 else 0
 
-# Process Returns Matrix Safely
+# Process Returns Matrix Safely with inherited region column
 if not returns_df.empty:
-    ret_date_col = [c for c in returns_df.columns if 'date' in c.lower()][0]
-    returns_df[ret_date_col] = pd.to_datetime(returns_df[ret_date_col], errors='coerce')
-    returns_df['Year'] = returns_df[ret_date_col].dt.year
-    
-    ret_prod_key = [c for c in returns_df.columns if 'product' in c.lower() and 'key' in c.lower()][0]
-    prod_key_main = [c for c in products.columns if 'product' in c.lower() and 'key' in c.lower()][0]
-    
-    returns_df[ret_prod_key] = returns_df[ret_prod_key].astype(str).str.strip()
-    products[prod_key_main] = products[prod_key_main].astype(str).str.strip()
-    
-    ret_detail = pd.merge(returns_df, products, left_on=ret_prod_key, right_on=prod_key_main, how='left')
-    
-    filtered_returns = ret_detail[ret_detail['Year'] == selected_year]
-    if region_col and selected_region != 'All Regions':
+    filtered_returns = returns_df[returns_df['Year'] == selected_year]
+    # FIX: Checked if the column exists in returns_df schema before executing subset filter
+    if region_col and region_col in filtered_returns.columns and selected_region != 'All Regions':
         filtered_returns = filtered_returns[filtered_returns[region_col] == selected_region]
         
     ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
-    filtered_returns[ret_qty_col] = pd.to_numeric(filtered_returns[ret_qty_col], errors='coerce').fillna(0)
     total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
 else:
     filtered_returns = pd.DataFrame()
@@ -381,8 +382,6 @@ elif page == "🔮 Forecasting & Strategy":
         last_idx = x[-1]
         next_month_pred = max(0, slope * (last_idx + 1) + intercept)
         next_quarter_pred = max(0, (slope * np.array([last_idx+1, last_idx+2, last_idx+3]) + intercept).sum())
-        
-        # EXTENDED: 12-Month Predictive Cumulative Extrapolation
         next_12m_pred = max(0, (slope * np.arange(last_idx+1, last_idx+13) + intercept).sum())
         
         fore_col1, fore_col2, fore_col3 = st.columns(3)
@@ -390,7 +389,6 @@ elif page == "🔮 Forecasting & Strategy":
         with fore_col2: st.metric(label="📊 Next Quarter Forecast (3M)", value=f"${next_quarter_pred:,.2f}")
         with fore_col3: st.metric(label="🔮 Outbound Next 12 Months Cumulative", value=f"${next_12m_pred:,.2f}", delta="Statistical Extrapolation")
             
-        # RESTORED: Extended time matrix back to 12 Months
         future_revenues = [max(0, slope * (last_idx + i) + intercept) for i in range(1, 13)]
         future_periods = [f"Forecast +{i}M" for i in range(1, 13)]
         forecast_df = pd.DataFrame({'YearMonth_Str': future_periods, 'Revenue': future_revenues, 'Type': 'Forecast'})
@@ -405,19 +403,15 @@ elif page == "🔮 Forecasting & Strategy":
         st.warning("Insufficient timeframe milestones to evaluate predictive regressions.")
 
     st.markdown("---")
-    # RESTORED: AI Executive Recommendation & Insights Engine derived from real dataframe states
     st.subheader("🧠 Executive AI Recommendation & Insights")
     rec_col1, rec_col2 = st.columns(2)
     
-    # Process high-level performers to formulate recommendations
     if not filtered_df.empty:
-        # Determine Top Category dynamically
         if cat_name_col and cat_name_col in filtered_df.columns:
             top_cat = filtered_df.groupby(cat_name_col)['Revenue'].sum().idxmax()
         else:
             top_cat = "Primary Portfolio Lines"
             
-        # Determine Weakest Territory Margin dynamically
         if region_col and region_col in filtered_df.columns:
             reg_m = filtered_df.groupby(region_col).agg({'Revenue':'sum','GrossProfit':'sum'})
             reg_m['Margin'] = reg_m['GrossProfit'] / reg_m['Revenue']
@@ -445,7 +439,6 @@ elif page == "🎛️ Scenario Simulation":
     st.subheader(f"Interactive financial modeling levers — Base Selection: FY{selected_year}")
     st.markdown("---")
     
-    # RESTORED: Preset Buttons (e.g., Aggressive Growth Plan)
     st.markdown("### ⚡ Quick Strategy Presets")
     preset_col1, preset_col2, preset_col3 = st.columns(3)
     
@@ -472,11 +465,8 @@ elif page == "🎛️ Scenario Simulation":
     sim_col_left, sim_col_right = st.columns([1, 2])
     with sim_col_left:
         st.subheader("Adjust Commercial Levers")
-        # Linked sliders inheriting preset values dynamically
         price_slider = st.slider("Average Pricing Adjustment (%)", min_value=-20.0, max_value=20.0, value=p_price, step=1.0)
         volume_slider = st.slider("Transaction Volume Delta (%)", min_value=-20.0, max_value=50.0, value=p_vol, step=1.0)
-        
-        # RESTORED: Target Return Reduction Slider
         return_reduction = st.slider("Target Return Mitigation/Reduction (%)", min_value=0, max_value=100, value=int(p_ret), step=5)
         
     with sim_col_right:
@@ -488,20 +478,17 @@ elif page == "🎛️ Scenario Simulation":
         sim_volume_factor = (1 + (volume_slider / 100))
         sim_price_factor = (1 + (price_slider / 100))
         
-        # Calculate return leakage mitigation savings
         if total_returns > 0 and not filtered_returns.empty:
             ret_price_col = [c for c in filtered_returns.columns if 'price' in c.lower() or 'amount' in c.lower()][0]
-            ret_qty_col = [c for c in filtered_returns.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
             total_leakage_value = (filtered_returns[ret_qty_col] * pd.to_numeric(filtered_returns[ret_price_col], errors='coerce').fillna(0)).sum()
         else:
             total_leakage_value = 0
             
         simulated_savings = total_leakage_value * (return_reduction / 100)
         
-        # Applied Simulation Formulas
         sim_rev = (base_rev * sim_volume_factor * sim_price_factor)
         sim_cost = (base_cost * sim_volume_factor)
-        sim_profit = (sim_rev - sim_cost) + simulated_savings # Savings directly improve net yields
+        sim_profit = (sim_rev - sim_cost) + simulated_savings
         sim_margin = (sim_profit / sim_rev) * 100 if sim_rev > 0 else 0
         
         sim_m1, sim_m2, sim_m3 = st.columns(3)
@@ -520,4 +507,4 @@ elif page == "🎛️ Scenario Simulation":
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v2.2 • Advanced Executive DSS Core Active.")
+st.caption("AdventureWorks Commercial Suite v2.3 • Advanced Executive DSS Core Active.")

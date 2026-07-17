@@ -29,13 +29,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. SMART DATA LOADING WITH FUZZY KEY MATCHING
+# 2. SMART DATA LOADING WITH DATA TYPE SANITIZATION
 # ==============================================================================
 @st.cache_data
 def load_and_merge_data():
     """
-    Loads AdventureWorks CSV files and dynamically resolves column key mismatches
-    (e.g., TerritoryKey vs SalesTerritoryKey) using fuzzy string matching.
+    Loads AdventureWorks CSV files, enforces identical data types on joining keys 
+    to avoid object-to-int merge crashes, and safely connects tables.
     """
     data_dir = "data" if os.path.exists("data") else "DATA"
     if not os.path.exists(data_dir):
@@ -52,24 +52,27 @@ def load_and_merge_data():
                 return df_temp
             except UnicodeDecodeError:
                 continue
-        return pd.read_csv(file_path, encoding='utf-8', errors='ignore')
+        df_temp = pd.read_csv(file_path, encoding='utf-8', errors='ignore')
+        df_temp.columns = df_temp.columns.str.strip()
+        return df_temp
 
     def find_best_key(df_cols, keywords):
-        """Finds the column name that contains the keywords sequentially."""
         for col in df_cols:
             if all(k.lower() in col.lower() for k in keywords):
                 return col
         return None
 
     def safe_merge(left_df, right_df, key_keywords, how='left'):
-        """Executes a left join even if column names are slightly different."""
         left_key = find_best_key(left_df.columns, key_keywords)
         right_key = find_best_key(right_df.columns, key_keywords)
         
         if left_key and right_key:
+            # FIX: Force both joining columns to String to avoid int64 vs str mismatch crashes
+            left_df[left_key] = left_df[left_key].astype(str).str.strip()
+            right_df[right_key] = right_df[right_key].astype(str).str.strip()
             return pd.merge(left_df, right_df, left_on=left_key, right_on=right_key, how=how)
         elif left_key:
-            # Fallback if right key missing, attempt using identical column names
+            left_df[left_key] = left_df[left_key].astype(str).str.strip()
             return pd.merge(left_df, right_df, on=left_key, how=how)
         return left_df
 
@@ -84,11 +87,9 @@ def load_and_merge_data():
         
     sales = pd.concat(sales_dfs, ignore_index=True)
     
-    # Resolve Date Sifgatures Safely
     date_col = find_best_key(sales.columns, ["Date"]) or "OrderDate"
     sales[date_col] = pd.to_datetime(sales[date_col], errors='coerce')
     
-    # Helper to find and read lookup tables dynamically
     def find_and_read_lookup(keyword):
         matched = [f for f in all_files if keyword in f and f.endswith(".csv")]
         if not matched:
@@ -111,12 +112,12 @@ def load_and_merge_data():
     first_col = find_best_key(customers.columns, ["First"])
     last_col = find_best_key(customers.columns, ["Last"])
     if first_col and last_col:
-        customers['CustomerName'] = customers[first_col] + " " + customers[last_col]
+        customers['CustomerName'] = customers[first_col].astype(str) + " " + customers[last_col].astype(str)
     else:
         cust_id = find_best_key(customers.columns, ["Customer", "Key"]) or customers.columns[0]
         customers['CustomerName'] = "Customer " + customers[cust_id].astype(str)
 
-    # 4. Central Fact Table Joins
+    # 4. Central Fact Table Joins with Type Safety enforced in safe_merge
     df = safe_merge(sales, prod_model, ["Product", "Key"])
     df = safe_merge(df, territories, ["Territory", "Key"])
     df = safe_merge(df, customers, ["Customer", "Key"])
@@ -127,10 +128,14 @@ def load_and_merge_data():
     df['MonthName'] = df[date_col].dt.strftime('%B')
     df['YearMonth'] = df[date_col].dt.to_period('M')
     
-    # Map price and cost safely
+    # Numerical Calculations Sanitization
     qty_col = find_best_key(df.columns, ["Quantity"]) or "OrderQuantity"
     price_col = find_best_key(df.columns, ["Price"]) or "ProductPrice"
     cost_col = find_best_key(df.columns, ["Cost"]) or "ProductCost"
+    
+    df[qty_col] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
+    df[price_col] = pd.to_numeric(df[price_col], errors='coerce').fillna(0)
+    df[cost_col] = pd.to_numeric(df[cost_col], errors='coerce').fillna(0)
     
     df['Revenue'] = df[qty_col] * df[price_col]
     df['TotalCost'] = df[qty_col] * df[cost_col]
@@ -138,11 +143,11 @@ def load_and_merge_data():
     
     return df, returns_df, prod_model, territories, date_col, qty_col, price_col
 
-# Execute pipeline with smart keys active
+# Execute pipeline safely
 try:
     df, returns_df, products, territories, date_col, qty_col, price_col = load_and_merge_data()
 except Exception as e:
-    st.error(f"❌ Smart key mapping or table integration failed. Details: {e}")
+    st.error(f"❌ Table integration failed. Details: {e}")
     st.stop()
 
 # ==============================================================================
@@ -184,7 +189,7 @@ filtered_df = df[df['Year'] == selected_year]
 if region_col and selected_region != 'All Regions':
     filtered_df = filtered_df[filtered_df[region_col] == selected_region]
 
-# Core Metrics
+# Core Metrics Calculations
 total_revenue = filtered_df['Revenue'].sum() if not filtered_df.empty else 0
 total_profit = filtered_df['GrossProfit'].sum() if not filtered_df.empty else 0
 gross_margin = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
@@ -194,20 +199,23 @@ ord_id_col = ord_id_col[0] if ord_id_col else df.columns[0]
 num_orders = filtered_df[ord_id_col].nunique() if not filtered_df.empty else 0
 avg_order_value = total_revenue / num_orders if num_orders > 0 else 0
 
-# Process Returns Matrix
+# Process Returns Matrix Safely
 if not returns_df.empty:
     ret_date_col = [c for c in returns_df.columns if 'date' in c.lower()][0]
     returns_df[ret_date_col] = pd.to_datetime(returns_df[ret_date_col], errors='coerce')
     returns_df['Year'] = returns_df[ret_date_col].dt.year
     
-    # Dynamic merge for returns audit
     ret_prod_key = [c for c in returns_df.columns if 'product' in c.lower() and 'key' in c.lower()][0]
     prod_key_main = [c for c in products.columns if 'product' in c.lower() and 'key' in c.lower()][0]
+    
+    returns_df[ret_prod_key] = returns_df[ret_prod_key].astype(str).str.strip()
+    products[prod_key_main] = products[prod_key_main].astype(str).str.strip()
+    
     ret_detail = pd.merge(returns_df, products, left_on=ret_prod_key, right_on=prod_key_main, how='left')
     
     filtered_returns = ret_detail[ret_detail['Year'] == selected_year]
     ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower()][0]
-    total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
+    total_returns = pd.to_numeric(filtered_returns[ret_qty_col], errors='coerce').sum() if not filtered_returns.empty else 0
 else:
     filtered_returns = pd.DataFrame()
     total_returns = 0
@@ -237,10 +245,10 @@ if page == "📊 Executive Summary":
     st.markdown("### Quick Diagnostic")
     diag_col1, diag_col2 = st.columns(2)
     with diag_col1:
-        st.info(f"💡 **Pipeline Live:** Automated key resolution active. Intelligently matching relational data mappings for FY{selected_year}.")
+        st.info(f"💡 **Pipeline Live:** Schema types fully aligned. Dynamic parsing active for fiscal segment FY{selected_year}.")
     with diag_col2:
         if return_rate > 3.0:
-            st.warning(f"⚠️ **Attention Required:** Margin leakage detected. Return rate stands high at **{return_rate:.2f}%**. Inspect category breakdowns.")
+            st.warning(f"⚠️ **Attention Required:** Return rate is high at **{return_rate:.2f}%**. Inspect quality data via the Profitability tab.")
         else:
             st.success("✅ **Operations Stable:** Outbound fulfillment vectors are performing cleanly within standard guardrails.")
 
@@ -263,7 +271,7 @@ elif page == "🛍️ Sales Performance":
             fig_cat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_cat, use_container_width=True)
         else:
-            st.info("Product category structures mapped securely.")
+            st.info("Product category structural sync complete.")
 
     with col_right:
         st.subheader("Regional Market Share")
@@ -315,18 +323,18 @@ elif page == "💸 Profitability & Returns":
         if not filtered_df.empty and 'prod_margin' in locals() and not prod_margin.empty:
             problem_products = prod_margin[prod_margin['MarginPercent'] < prod_margin['MarginPercent'].median()].sort_values(by=qty_col, ascending=False)
             if not problem_products.empty:
-                st.warning(f"⚠️ **Volume/Margin Disconnect:** **{problem_products.iloc[0][prod_name_col]}** presents a high volume velocity paired with tight gross yields.")
+                st.warning(f"⚠️ **Volume/Margin Disconnect:** **{problem_products.iloc[0][prod_name_col]}** shows high transactional velocity but tight margins.")
             
             if region_col:
                 reg_margin = filtered_df.groupby(region_col).agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
                 reg_margin['MarginPercent'] = (reg_margin['GrossProfit'] / reg_margin['Revenue']) * 100
                 lowest_reg = reg_margin.sort_values(by='MarginPercent').iloc[0]
-                st.info(f"🌍 **Territory Review:** **{lowest_reg[region_col]}** shows structural margin friction landing at **{lowest_reg['MarginPercent']:.1f}%**.")
+                st.info(f"🌍 **Territory Review:** **{lowest_reg[region_col]}** presents structural margin friction standing at **{lowest_reg['MarginPercent']:.1f}%**.")
 
     st.markdown("---")
     st.subheader("🔄 Returns Audit")
     if filtered_returns.empty:
-        st.success("🎉 **Operational Excellence:** Zero financial leaks from returns detected in this branch.")
+        st.success("🎉 **Operational Excellence:** No financial leaks from returns detected.")
     else:
         ret_col1, ret_col2 = st.columns(2)
         ret_prod_name = [c for c in filtered_returns.columns if 'product' in c.lower() and 'name' in c.lower()][0]
@@ -382,7 +390,7 @@ elif page == "🔮 Forecasting & Strategy":
         fig_forecast = px.line(combined_forecast, x='YearMonth_Str', y='Revenue', color='Type', color_discrete_map={'Historical': '#003366', 'Forecast': '#ff7f0e'})
         st.plotly_chart(fig_forecast, use_container_width=True)
     else:
-        st.warning("Insufficient continuous timeframe milestones to process predictive trends.")
+        st.warning("Insufficient timeframe milestones to evaluate predictive regressions.")
 
 # ==============================================================================
 # PAGE 5: SCENARIO SIMULATION (WHAT-IF ANALYSIS)
@@ -426,4 +434,4 @@ elif page == "🎛️ Scenario Simulation":
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v1.9 • Key Resolution Engine Active.")
+st.caption("AdventureWorks Commercial Suite v2.0 • Data Type Protection Active.")

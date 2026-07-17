@@ -67,7 +67,6 @@ def load_and_merge_data():
         right_key = find_best_key(right_df.columns, key_keywords)
         
         if left_key and right_key:
-            # FIX: Force both joining columns to String to avoid int64 vs str mismatch crashes
             left_df[left_key] = left_df[left_key].astype(str).str.strip()
             right_df[right_key] = right_df[right_key].astype(str).str.strip()
             return pd.merge(left_df, right_df, left_on=left_key, right_on=right_key, how=how)
@@ -117,7 +116,7 @@ def load_and_merge_data():
         cust_id = find_best_key(customers.columns, ["Customer", "Key"]) or customers.columns[0]
         customers['CustomerName'] = "Customer " + customers[cust_id].astype(str)
 
-    # 4. Central Fact Table Joins with Type Safety enforced in safe_merge
+    # 4. Central Fact Table Joins
     df = safe_merge(sales, prod_model, ["Product", "Key"])
     df = safe_merge(df, territories, ["Territory", "Key"])
     df = safe_merge(df, customers, ["Customer", "Key"])
@@ -214,8 +213,11 @@ if not returns_df.empty:
     ret_detail = pd.merge(returns_df, products, left_on=ret_prod_key, right_on=prod_key_main, how='left')
     
     filtered_returns = ret_detail[ret_detail['Year'] == selected_year]
-    ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower()][0]
-    total_returns = pd.to_numeric(filtered_returns[ret_qty_col], errors='coerce').sum() if not filtered_returns.empty else 0
+    
+    # FIX: Dynamically target ONLY the quantity column for sums to avoid summing DateTime types
+    ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
+    filtered_returns[ret_qty_col] = pd.to_numeric(filtered_returns[ret_qty_col], errors='coerce').fillna(0)
+    total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
 else:
     filtered_returns = pd.DataFrame()
     total_returns = 0
@@ -328,8 +330,9 @@ elif page == "💸 Profitability & Returns":
             if region_col:
                 reg_margin = filtered_df.groupby(region_col).agg({'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
                 reg_margin['MarginPercent'] = (reg_margin['GrossProfit'] / reg_margin['Revenue']) * 100
-                lowest_reg = reg_margin.sort_values(by='MarginPercent').iloc[0]
-                st.info(f"🌍 **Territory Review:** **{lowest_reg[region_col]}** presents structural margin friction standing at **{lowest_reg['MarginPercent']:.1f}%**.")
+                if not reg_margin.empty:
+                    lowest_reg = reg_margin.sort_values(by='MarginPercent').iloc[0]
+                    st.info(f"🌍 **Territory Review:** **{lowest_reg[region_col]}** presents structural margin friction standing at **{lowest_reg['MarginPercent']:.1f}%**.")
 
     st.markdown("---")
     st.subheader("🔄 Returns Audit")
@@ -338,21 +341,24 @@ elif page == "💸 Profitability & Returns":
     else:
         ret_col1, ret_col2 = st.columns(2)
         ret_prod_name = [c for c in filtered_returns.columns if 'product' in c.lower() and 'name' in c.lower()][0]
-        ret_qty_col = [c for c in filtered_returns.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower()][0]
         
         with ret_col1:
             st.subheader("Top Returned Products")
-            top_returned = filtered_returns.groupby(ret_prod_name).agg({ret_qty_col: 'sum'}).sort_values(by=ret_qty_col, ascending=False).head(5).reset_index()
+            # FIX: Forced aggregation dynamically on the targeted quantity column to isolate safely
+            top_returned = filtered_returns.groupby(ret_prod_name)[ret_qty_col].sum().reset_index()
+            top_returned = top_returned.sort_values(by=ret_qty_col, ascending=False).head(5)
             fig_ret_bar = px.bar(top_returned, y=ret_prod_name, x=ret_qty_col, orientation='h', color_discrete_sequence=['#e74c3c'])
+            fig_ret_bar.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_ret_bar, use_container_width=True)
+            
         with ret_col2:
             st.subheader("Financial Impact of Returns")
             ret_price_col = [c for c in filtered_returns.columns if 'price' in c.lower() or 'amount' in c.lower()][0]
-            filtered_returns['RevenueLost'] = filtered_returns[ret_qty_col] * filtered_returns[ret_price_col]
+            filtered_returns['RevenueLost'] = filtered_returns[ret_qty_col] * pd.to_numeric(filtered_returns[ret_price_col], errors='coerce').fillna(0)
             ret_cat_col = [c for c in filtered_returns.columns if 'category' in c.lower() and 'name' in c.lower()]
             ret_cat_col = ret_cat_col[0] if ret_cat_col else ret_prod_name
             
-            cat_returns = filtered_returns.groupby(ret_cat_col).agg({'RevenueLost': 'sum'}).reset_index()
+            cat_returns = filtered_returns.groupby(ret_cat_col)['RevenueLost'].sum().reset_index()
             fig_ret_pie = px.pie(cat_returns, values='RevenueLost', names=ret_cat_col, color_discrete_sequence=px.colors.sequential.Reds_r)
             st.plotly_chart(fig_ret_pie, use_container_width=True)
 
@@ -434,4 +440,4 @@ elif page == "🎛️ Scenario Simulation":
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v2.0 • Data Type Protection Active.")
+st.caption("AdventureWorks Commercial Suite v2.1 • Type-Safe Aggregation Engine Active.")

@@ -213,8 +213,9 @@ if not returns_df.empty:
     ret_detail = pd.merge(returns_df, products, left_on=ret_prod_key, right_on=prod_key_main, how='left')
     
     filtered_returns = ret_detail[ret_detail['Year'] == selected_year]
-    
-    # FIX: Dynamically target ONLY the quantity column for sums to avoid summing DateTime types
+    if region_col and selected_region != 'All Regions':
+        filtered_returns = filtered_returns[filtered_returns[region_col] == selected_region]
+        
     ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
     filtered_returns[ret_qty_col] = pd.to_numeric(filtered_returns[ret_qty_col], errors='coerce').fillna(0)
     total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
@@ -224,6 +225,10 @@ else:
 
 total_sold = filtered_df[qty_col].sum() if not filtered_df.empty else 0
 return_rate = (total_returns / total_sold) * 100 if total_sold > 0 else 0
+
+# Dynamic Variable Fetch for Advanced Text Analysis
+cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower() or 'category' in c.lower() and 'key' not in c.lower()]
+cat_name_col = cat_name_col[0] if cat_name_col else None
 
 # ==============================================================================
 # PAGE 1: EXECUTIVE SUMMARY
@@ -262,8 +267,6 @@ elif page == "🛍️ Sales Performance":
     st.markdown("---")
     
     col_left, col_right = st.columns(2)
-    cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower() or 'category' in c.lower() and 'key' not in c.lower()]
-    cat_name_col = cat_name_col[0] if cat_name_col else None
     
     with col_left:
         st.subheader("Category Revenue & Profit Share")
@@ -305,17 +308,16 @@ elif page == "💸 Profitability & Returns":
     st.markdown("---")
     
     prod_name_col = [c for c in df.columns if 'product' in c.lower() and 'name' in c.lower()][0]
-    cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower()]
-    cat_name_col = cat_name_col[0] if cat_name_col else prod_name_col
+    cat_name_col_scatter = cat_name_col if cat_name_col else prod_name_col
     
     prof_col1, prof_col2 = st.columns([3, 2])
     with prof_col1:
         st.subheader("Product Profitability Quadrant")
         if not filtered_df.empty:
-            prod_margin = filtered_df.groupby([prod_name_col, cat_name_col]).agg({qty_col: 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
+            prod_margin = filtered_df.groupby([prod_name_col, cat_name_col_scatter]).agg({qty_col: 'sum', 'Revenue': 'sum', 'GrossProfit': 'sum'}).reset_index()
             prod_margin['MarginPercent'] = (prod_margin['GrossProfit'] / prod_margin['Revenue']) * 100
             
-            fig_scatter = px.scatter(prod_margin, x=qty_col, y='MarginPercent', size='Revenue', color=cat_name_col, hover_name=prod_name_col)
+            fig_scatter = px.scatter(prod_margin, x=qty_col, y='MarginPercent', size='Revenue', color=cat_name_col_scatter, hover_name=prod_name_col)
             fig_scatter.add_hline(y=prod_margin['MarginPercent'].mean(), line_dash="dash", line_color="red")
             fig_scatter.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_scatter, use_container_width=True)
@@ -344,7 +346,6 @@ elif page == "💸 Profitability & Returns":
         
         with ret_col1:
             st.subheader("Top Returned Products")
-            # FIX: Forced aggregation dynamically on the targeted quantity column to isolate safely
             top_returned = filtered_returns.groupby(ret_prod_name)[ret_qty_col].sum().reset_index()
             top_returned = top_returned.sort_values(by=ret_qty_col, ascending=False).head(5)
             fig_ret_bar = px.bar(top_returned, y=ret_prod_name, x=ret_qty_col, orientation='h', color_discrete_sequence=['#e74c3c'])
@@ -363,10 +364,10 @@ elif page == "💸 Profitability & Returns":
             st.plotly_chart(fig_ret_pie, use_container_width=True)
 
 # ==============================================================================
-# PAGE 4: FORECASTING & STRATEGY
+# PAGE 4: FORECASTING & STRATEGY (WITH EXTENDED 12M FORECAST & AI ENGINE)
 # ==============================================================================
 elif page == "🔮 Forecasting & Strategy":
-    st.title("🔮 Forecasting & Executive Strategy")
+    st.title("🔮 Predictive Forecasting & Executive Strategy Engine")
     st.markdown("---")
     
     monthly_sales = df.groupby('YearMonth')['Revenue'].sum().reset_index()
@@ -381,12 +382,17 @@ elif page == "🔮 Forecasting & Strategy":
         next_month_pred = max(0, slope * (last_idx + 1) + intercept)
         next_quarter_pred = max(0, (slope * np.array([last_idx+1, last_idx+2, last_idx+3]) + intercept).sum())
         
-        fore_col1, fore_col2 = st.columns(2)
+        # EXTENDED: 12-Month Predictive Cumulative Extrapolation
+        next_12m_pred = max(0, (slope * np.arange(last_idx+1, last_idx+13) + intercept).sum())
+        
+        fore_col1, fore_col2, fore_col3 = st.columns(3)
         with fore_col1: st.metric(label="🎯 Next Month Revenue Forecast", value=f"${next_month_pred:,.2f}")
         with fore_col2: st.metric(label="📊 Next Quarter Forecast (3M)", value=f"${next_quarter_pred:,.2f}")
+        with fore_col3: st.metric(label="🔮 Outbound Next 12 Months Cumulative", value=f"${next_12m_pred:,.2f}", delta="Statistical Extrapolation")
             
-        future_revenues = [max(0, slope * (last_idx + i) + intercept) for i in range(1, 7)]
-        future_periods = [f"Forecast +{i}M" for i in range(1, 7)]
+        # RESTORED: Extended time matrix back to 12 Months
+        future_revenues = [max(0, slope * (last_idx + i) + intercept) for i in range(1, 13)]
+        future_periods = [f"Forecast +{i}M" for i in range(1, 13)]
         forecast_df = pd.DataFrame({'YearMonth_Str': future_periods, 'Revenue': future_revenues, 'Type': 'Forecast'})
         
         historical_df = monthly_sales[['YearMonth_Str', 'Revenue']].copy()
@@ -398,18 +404,80 @@ elif page == "🔮 Forecasting & Strategy":
     else:
         st.warning("Insufficient timeframe milestones to evaluate predictive regressions.")
 
+    st.markdown("---")
+    # RESTORED: AI Executive Recommendation & Insights Engine derived from real dataframe states
+    st.subheader("🧠 Executive AI Recommendation & Insights")
+    rec_col1, rec_col2 = st.columns(2)
+    
+    # Process high-level performers to formulate recommendations
+    if not filtered_df.empty:
+        # Determine Top Category dynamically
+        if cat_name_col and cat_name_col in filtered_df.columns:
+            top_cat = filtered_df.groupby(cat_name_col)['Revenue'].sum().idxmax()
+        else:
+            top_cat = "Primary Portfolio Lines"
+            
+        # Determine Weakest Territory Margin dynamically
+        if region_col and region_col in filtered_df.columns:
+            reg_m = filtered_df.groupby(region_col).agg({'Revenue':'sum','GrossProfit':'sum'})
+            reg_m['Margin'] = reg_m['GrossProfit'] / reg_m['Revenue']
+            worst_reg = reg_m['Margin'].idxmin()
+        else:
+            worst_reg = "Selected Sub-Territories"
+            
+        with rec_col1:
+            st.markdown("#### 🎯 Core Portfolio Drivers")
+            st.success(f"🏆 **Growth Engine identified:** **{top_cat}** represents the highest revenue velocity. Commercial allocation should prioritize raw logistics buffer scaling for this segment to lock down cross-selling pipelines.")
+            st.info(f"🌍 **Territory Review Directive:** **{worst_reg}** exhibits localized margin drag. Regional Sales Directors should freeze local discounts and mandate a minimum 2.5% price cushion to counteract freight leakages.")
+            
+        with rec_col2:
+            st.markdown("#### ⚠️ Operational Audit & Returns Mitigation")
+            if return_rate > 2.0:
+                st.error(f"🚨 **Leakage Warning:** The current return wave at **{return_rate:.2f}%** is bottlenecking gross profit realization. E-commerce fulfillment must cross-reference factory SKUs to reduce packaging errors.")
+            else:
+                st.success(f"✅ **Fulfillment Vector Intact:** Outbound return metrics (**{return_rate:.2f}%**) demonstrate optimal operational quality control. Capital expenditure can be safely redirected from buffer storage to regional marketing runs.")
+
 # ==============================================================================
-# PAGE 5: SCENARIO SIMULATION (WHAT-IF ANALYSIS)
+# PAGE 5: SCENARIO SIMULATION (RESTORED PRESETS & MULTI-SLIDERS)
 # ==============================================================================
 elif page == "🎛️ Scenario Simulation":
     st.title("🎛️ Strategic Commercial Simulator")
+    st.subheader(f"Interactive financial modeling levers — Base Selection: FY{selected_year}")
     st.markdown("---")
     
+    # RESTORED: Preset Buttons (e.g., Aggressive Growth Plan)
+    st.markdown("### ⚡ Quick Strategy Presets")
+    preset_col1, preset_col2, preset_col3 = st.columns(3)
+    
+    p_price, p_vol, p_ret = 0.0, 0.0, 0.0
+    
+    with preset_col1:
+        if st.button("🚀 Aggressive Growth Plan"):
+            p_price = 5.0
+            p_vol = 25.0
+            p_ret = 40.0
+            st.toast("Applied: +5% Price, +25% Volume, 40% Return Reduction")
+    with preset_col2:
+        if st.button("🛡️ Defensive Optimization"):
+            p_price = -2.0
+            p_vol = 10.0
+            p_ret = 60.0
+            st.toast("Applied: -2% Price, +10% Volume, 60% Return Reduction")
+    with preset_col3:
+        if st.button("🔄 Reset to Base State"):
+            p_price, p_vol, p_ret = 0.0, 0.0, 0.0
+            st.toast("Reset Completed")
+
+    st.markdown("---")
     sim_col_left, sim_col_right = st.columns([1, 2])
     with sim_col_left:
         st.subheader("Adjust Commercial Levers")
-        price_slider = st.slider("Average Pricing Adjustment (%)", min_value=-20.0, max_value=20.0, value=0.0, step=1.0)
-        volume_slider = st.slider("Transaction Volume Delta (%)", min_value=-20.0, max_value=50.0, value=0.0, step=1.0)
+        # Linked sliders inheriting preset values dynamically
+        price_slider = st.slider("Average Pricing Adjustment (%)", min_value=-20.0, max_value=20.0, value=p_price, step=1.0)
+        volume_slider = st.slider("Transaction Volume Delta (%)", min_value=-20.0, max_value=50.0, value=p_vol, step=1.0)
+        
+        # RESTORED: Target Return Reduction Slider
+        return_reduction = st.slider("Target Return Mitigation/Reduction (%)", min_value=0, max_value=100, value=int(p_ret), step=5)
         
     with sim_col_right:
         st.subheader("Simulated Business Impact")
@@ -420,9 +488,20 @@ elif page == "🎛️ Scenario Simulation":
         sim_volume_factor = (1 + (volume_slider / 100))
         sim_price_factor = (1 + (price_slider / 100))
         
-        sim_rev = base_rev * sim_volume_factor * sim_price_factor
-        sim_cost = base_cost * sim_volume_factor
-        sim_profit = sim_rev - sim_cost
+        # Calculate return leakage mitigation savings
+        if total_returns > 0 and not filtered_returns.empty:
+            ret_price_col = [c for c in filtered_returns.columns if 'price' in c.lower() or 'amount' in c.lower()][0]
+            ret_qty_col = [c for c in filtered_returns.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
+            total_leakage_value = (filtered_returns[ret_qty_col] * pd.to_numeric(filtered_returns[ret_price_col], errors='coerce').fillna(0)).sum()
+        else:
+            total_leakage_value = 0
+            
+        simulated_savings = total_leakage_value * (return_reduction / 100)
+        
+        # Applied Simulation Formulas
+        sim_rev = (base_rev * sim_volume_factor * sim_price_factor)
+        sim_cost = (base_cost * sim_volume_factor)
+        sim_profit = (sim_rev - sim_cost) + simulated_savings # Savings directly improve net yields
         sim_margin = (sim_profit / sim_rev) * 100 if sim_rev > 0 else 0
         
         sim_m1, sim_m2, sim_m3 = st.columns(3)
@@ -437,7 +516,8 @@ elif page == "🎛️ Scenario Simulation":
             'Simulated State': [sim_rev, sim_profit]
         })
         fig_comp = px.bar(comp_df, x='Metric', y=['Current State', 'Simulated State'], barmode='group', color_discrete_sequence=['#003366', '#ff7f0e'])
+        fig_comp.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v2.1 • Type-Safe Aggregation Engine Active.")
+st.caption("AdventureWorks Commercial Suite v2.2 • Advanced Executive DSS Core Active.")

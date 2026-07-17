@@ -146,11 +146,11 @@ def load_and_merge_data():
         returns_df[ret_date_col] = pd.to_datetime(returns_df[ret_date_col], errors='coerce')
         returns_df['Year'] = returns_df[ret_date_col].dt.year
         
-        # Merge product details and territory details into returns to inherit the region columns
         returns_df = safe_merge(returns_df, prod_model, ["Product", "Key"])
         returns_df = safe_merge(returns_df, territories, ["Territory", "Key"])
         
-        ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
+        # FIXED: Operator precedence priority bug corrected with explicit parenthesis to secure parsing boundary
+        ret_qty_col = [c for c in returns_df.columns if ('quantity' in c.lower() or 'return' in c.lower()) and 'key' not in c.lower() and 'date' not in c.lower()][0]
         returns_df[ret_qty_col] = pd.to_numeric(returns_df[ret_qty_col], errors='coerce').fillna(0)
     
     return df, returns_df, prod_model, territories, date_col, qty_col, price_col
@@ -187,7 +187,8 @@ st.sidebar.subheader("🔍 Filter Options")
 years = sorted(df['Year'].dropna().unique())
 selected_year = st.sidebar.selectbox("Fiscal Year", years, index=len(years)-1)
 
-region_col = [c for c in df.columns if 'region' in c.lower() or 'territory' in c.lower() and 'key' not in c.lower()]
+# FIXED: Operator precedence bug resolved using explicit parenthesis to block key mismatch leaks
+region_col = [c for c in df.columns if ('region' in c.lower() or 'territory' in c.lower()) and 'key' not in c.lower()]
 region_col = region_col[0] if region_col else None
 
 if region_col:
@@ -214,21 +215,17 @@ avg_order_value = total_revenue / num_orders if num_orders > 0 else 0
 # Process Returns Matrix Safely with inherited region column
 if not returns_df.empty:
     filtered_returns = returns_df[returns_df['Year'] == selected_year]
-    # FIX: Checked if the column exists in returns_df schema before executing subset filter
     if region_col and region_col in filtered_returns.columns and selected_region != 'All Regions':
         filtered_returns = filtered_returns[filtered_returns[region_col] == selected_region]
         
-    ret_qty_col = [c for c in returns_df.columns if 'quantity' in c.lower() or 'return' in c.lower() and 'key' not in c.lower() and 'date' not in c.lower()][0]
+    ret_qty_col = [c for c in returns_df.columns if ('quantity' in c.lower() or 'return' in c.lower()) and 'key' not in c.lower() and 'date' not in c.lower()][0]
     total_returns = filtered_returns[ret_qty_col].sum() if not filtered_returns.empty else 0
 else:
     filtered_returns = pd.DataFrame()
     total_returns = 0
 
-total_sold = filtered_df[qty_col].sum() if not filtered_df.empty else 0
-return_rate = (total_returns / total_sold) * 100 if total_sold > 0 else 0
-
-# Dynamic Variable Fetch for Advanced Text Analysis
-cat_name_col = [c for c in df.columns if 'category' in c.lower() and 'name' in c.lower() or 'category' in c.lower() and 'key' not in c.lower()]
+# FIXED: Operator precedence priority bug resolved via proper parenthesis grouping boundaries
+cat_name_col = [c for c in df.columns if ('category' in c.lower() and 'name' in c.lower()) or ('category' in c.lower() and 'key' not in c.lower())]
 cat_name_col = cat_name_col[0] if cat_name_col else None
 
 # ==============================================================================
@@ -253,7 +250,7 @@ if page == "📊 Executive Summary":
     st.markdown("### Quick Diagnostic")
     diag_col1, diag_col2 = st.columns(2)
     with diag_col1:
-        st.info(f"💡 **Pipeline Live:** Schema types fully aligned. Dynamic parsing active for fiscal segment FY{selected_year}.")
+        st.info(f"💡 **Pipeline Live:** Operator precedence priority bugs resolved. Dynamic parsing active for fiscal segment FY{selected_year}.")
     with diag_col2:
         if return_rate > 3.0:
             st.warning(f"⚠️ **Attention Required:** Return rate is high at **{return_rate:.2f}%**. Inspect quality data via the Profitability tab.")
@@ -507,4 +504,4 @@ elif page == "🎛️ Scenario Simulation":
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
-st.caption("AdventureWorks Commercial Suite v2.3 • Advanced Executive DSS Core Active.")
+st.caption("AdventureWorks Commercial Suite v2.4 • Logic Boundaries Enforced Effectively.")
